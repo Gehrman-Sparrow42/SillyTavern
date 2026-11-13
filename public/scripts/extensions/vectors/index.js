@@ -38,6 +38,7 @@ import { generateWebLlmChatPrompt, isWebLlmSupported } from '../shared.js';
 import { WebLlmVectorProvider } from './webllm.js';
 import { removeReasoningFromString } from '../../reasoning.js';
 import { oai_settings } from '../../openai.js';
+import { beginRecallTrace, recordRecallTrace, sourceMessageIndex } from '../../companion-shell/recall-state.js';
 
 /**
  * @typedef {object} HashedMessage
@@ -780,6 +781,10 @@ async function rearrangeChat(chat, _contextSize, _abort, type) {
             return;
         }
 
+        const recallContext = getContext();
+        const recallToken = beginRecallTrace(recallContext);
+        const recallSource = recallContext.chat.slice();
+
         // Clear the extension prompt
         setExtensionPrompt(EXTENSION_PROMPT_TAG, '', settings.position, settings.depth, settings.include_wi);
         setExtensionPrompt(EXTENSION_PROMPT_TAG_DB, '', settings.file_position_db, settings.file_depth_db, settings.include_wi, settings.file_depth_role_db);
@@ -837,6 +842,11 @@ async function rearrangeChat(chat, _contextSize, _abort, type) {
         // Order is reversed because more relevant are at the lower indices
         queriedMessages.sort((a, b) => queryHashes.indexOf(getStringHash(substituteParams(b.mes))) - queryHashes.indexOf(getStringHash(substituteParams(a.mes))));
 
+        const recallMessages = queriedMessages.map(message => {
+            const index = sourceMessageIndex(message, recallSource);
+            return { index, source: index === null ? null : recallSource[index], name: message.name, text: message.mes };
+        });
+
         // Remove queried messages from the original chat array
         for (const message of chat) {
             if (queriedMessages.includes(message)) {
@@ -852,6 +862,7 @@ async function rearrangeChat(chat, _contextSize, _abort, type) {
         // Format queried messages into a single string
         const insertedText = getPromptText(queriedMessages);
         setExtensionPrompt(EXTENSION_PROMPT_TAG, insertedText, settings.position, settings.depth, settings.include_wi);
+        recordRecallTrace(recallToken, getContext(), recallMessages, insertedText);
     } catch (error) {
         toastr.error('Generation interceptor aborted. Check browser console for more details.', 'Vector Storage');
         console.error('Vectors: Failed to rearrange chat', error);

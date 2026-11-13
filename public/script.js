@@ -271,6 +271,7 @@ import { initBulkEdit } from './scripts/bulk-edit.js';
 import { getContext } from './scripts/st-context.js';
 import { extractReasoningFromData, extractReasoningSignatureFromData, initReasoning, parseReasoningInSwipes, PromptReasoning, ReasoningHandler, removeReasoningFromString, updateReasoningUI } from './scripts/reasoning.js';
 import { accountStorage } from './scripts/util/AccountStorage.js';
+import { assertCompanionWriteAllowed } from './scripts/companion-shell/resilience.js';
 import { initWelcomeScreen, openPermanentAssistantChat, openPermanentAssistantCard, getPermanentAssistantAvatar } from './scripts/welcome-screen.js';
 import { initDataMaid } from './scripts/data-maid.js';
 import { clearItemizedPrompts, deleteItemizedPromptForMessage, deleteItemizedPrompts, findItemizedPromptSet, initItemizedPrompts, itemizedParams, itemizedPrompts, loadItemizedPrompts, promptItemize, replaceItemizedPromptText, saveItemizedPrompts, swapItemizedPrompts } from './scripts/itemized-prompts.js';
@@ -4288,6 +4289,7 @@ function removeLastMessage() {
  * @returns {Promise<any>} Returns a promise that resolves when the text is done generating.
  */
 export async function Generate(type, { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage, quietName, jsonSchema = null, depth = 0 } = {}, dryRun = false) {
+    if (!dryRun) await assertCompanionWriteAllowed();
     console.log('Generate entered');
     setGenerationProgress(0);
     generation_started = new Date();
@@ -7361,10 +7363,15 @@ async function renamePastChats(oldAvatar, newAvatar, newName) {
 export function saveChatDebounced() {
     const chid = this_chid;
     const selectedGroup = selected_group;
+    const saveIdentity = getChatSaveIdentity();
 
     cancelDebouncedChatSave();
 
     chatSaveTimeout = setTimeout(async () => {
+        if (saveIdentity !== getChatSaveIdentity()) {
+            console.warn('Chat changed before deferred save. Aborting.');
+            return;
+        }
         if (selectedGroup !== selected_group) {
             console.warn('Chat save timeout triggered, but group changed. Aborting.');
             return;
@@ -7393,6 +7400,9 @@ export function saveChatDebounced() {
  * @returns {Promise<void>}
  */
 export async function saveChat({ chatName, withMetadata, mesId, force = false, chatData = undefined } = {}) {
+    const saveIdentity = getChatSaveIdentity();
+    await assertCompanionWriteAllowed();
+    if (saveIdentity !== getChatSaveIdentity()) throw new Error('Conversation changed before saving.');
     if (selected_group) {
         toastr.error(t`Operation was aborted to prevent data corruption.`, t`saveChat called for a group chat`);
         throw new Error('saveChat called for a group chat');
@@ -8054,6 +8064,8 @@ export async function saveSettings(loopCounter = 0) {
         saveSettingsDebounced();
         return;
     }
+
+    await assertCompanionWriteAllowed();
 
     const MAX_RETRIES = 3;
     if (TempResponseLength.isCustomized()) {
@@ -9409,11 +9421,23 @@ export async function saveMetadata() {
     return await saveChatConditional();
 }
 
+/** Include stable owner identity because chat filenames can repeat across cards. */
+function getChatSaveIdentity() {
+    return JSON.stringify([selected_group, characters[this_chid]?.avatar, getCurrentChatId()]);
+}
+
 export async function saveChatConditional() {
+    const saveIdentity = getChatSaveIdentity();
+    await assertCompanionWriteAllowed();
     try {
         await waitUntilCondition(() => !isChatSaving, DEFAULT_SAVE_EDIT_TIMEOUT, 100);
     } catch {
         console.warn('Timeout waiting for chat to save');
+        return;
+    }
+
+    if (saveIdentity !== getChatSaveIdentity()) {
+        console.warn('Conversation changed while waiting to save. Aborting.');
         return;
     }
 
@@ -9429,8 +9453,10 @@ export async function saveChatConditional() {
         }
 
         // Save token and prompts cache to IndexedDB storage
-        saveTokenCache();
-        saveItemizedPrompts(getCurrentChatId());
+        if (saveIdentity === getChatSaveIdentity()) {
+            saveTokenCache();
+            saveItemizedPrompts(getCurrentChatId());
+        }
     } catch (error) {
         console.error('Error saving chat', error);
     } finally {

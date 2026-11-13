@@ -1,4 +1,5 @@
 import { Fuse } from '../lib.js';
+import { assertCompanionWriteAllowed } from './companion-shell/resilience.js';
 
 import {
     shuffle,
@@ -621,6 +622,7 @@ function resetSelectedGroup() {
  * @returns {Promise<void>} A promise that resolves when the group chat has been saved.
  */
 async function saveGroupChat(groupId, shouldSaveGroup, force = false) {
+    await assertCompanionWriteAllowed();
     const group = groups.find(x => x.id == groupId);
     if (!group) {
         console.warn('Group not found', groupId);
